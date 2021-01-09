@@ -25,4 +25,19 @@ class CompanyController extends Controller
             ]
         ];
     }
+
+    /**
+     * 保存（POST）
+     *
+     * @param Request $Request
+     * @return void
+     */
+    public function store(Request $request)
+    {
+        if ($request['data'] === true) {
+            return ['result' => 'OK'];
+        } else {
+            return ['result' => 'NG'];
+        }
+    }
 }
