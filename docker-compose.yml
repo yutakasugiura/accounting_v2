@@ -6,6 +6,8 @@ services:
     build: ./docker/php
     volumes:
       - ./server:/var/www
+    ports:
+      - "9000:9000"
 
   nginx:
     image: nginx
