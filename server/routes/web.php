@@ -17,3 +17,7 @@ Route::get('/', function () {
     dd('hello');
     return view('welcome');
 });
+
+Route::name('company')->get('/company', function () {
+    return view('company');
+});
