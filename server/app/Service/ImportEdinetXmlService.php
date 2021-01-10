@@ -31,7 +31,7 @@ class ImportEdinetXmlService
      * @param array $company_details
      * @return array
      */
-    private function readCompanyDetails(array $details): array
+    private function readCompanyDetails(array $details, string $stock_code): array
     {
         //基本情報
         $company = $this->formatBasicInfo($details, $stock_code);
