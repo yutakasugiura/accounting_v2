@@ -23,5 +23,7 @@ Route::get('/', function () {
 Route::prefix('/')->name('api.')->group(function(){
     Route::prefix('company')->name('company.')->group(function () {
         Route::get('/', 'Api\CompanyController@index')->name('index');
+        Route::get('/create/{stock_code}', 'Api\CompanyController@create')->name('create');
+        Route::post('/store', 'Api\CompanyController@store')->name('store');
     });
 });
