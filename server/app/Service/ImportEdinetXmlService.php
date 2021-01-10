@@ -2,37 +2,18 @@
 
 namespace App\Service;
 
-use App\Article;
-use Illuminate\Http\Request;
-use App\Http\Controllers\Controller;
-use Illuminate\Support\Facades\Storage;
-use Weidner\Goutte\GoutteFacade as Goutte;
+use App\Format\ViewFormat;
 
 class ImportEdinetXmlService
 {
-    public function import()
-    {
-        //APIを叩き、StorageにXMLをzipで保存
-        $code = 'S100IOBO';
-        $getUri = 'https://disclosure.edinet-fsa.go.jp/api/v1/documents/'.$code.'?type=1';
-
-        $filePath = 'private/'.$code.'.zip';
-
-        //財務情報を取得＆整形
-        $company = $this->readSecurityReport();
-        dd($company);
-
-    }
-
     /**
      * 有価証券報告書の企業情報を取得
      *
      * @return array
      */
-    private function readSecurityReport()
+    public function import(string $stock_code): array
     {
-        $file_name = 'jpcrp030000-asr-001_E02925-000_2020-02-29_01_2020-06-01.xbrl';
-        $get_data = storage_path('app/public/XBRL/PublicDoc/'.$file_name);
+        $get_data = storage_path('app/company/'.$stock_code.'.xbrl');
 
         $xml = simplexml_load_file($get_data);
 
@@ -40,8 +21,7 @@ class ImportEdinetXmlService
             $result = $xml->children($name);
             $xml_object[$key][] = (array)$result;
         }
-
-        $this->readCompanyDetails($xml_object['jpcrp_cor'][0]);
+        return $this->readCompanyDetails($xml_object['jpcrp_cor'][0], $stock_code);
 
     }
 
@@ -54,28 +34,162 @@ class ImportEdinetXmlService
     private function readCompanyDetails(array $details): array
     {
         //基本情報
-        $company = [
-            'company' => $details['CompanyNameCoverPage'],
-            'ceo'     => $details['TitleAndNameOfRepresentativeCoverPage'],
-            'address' => $details['AddressOfRegisteredHeadquarterCoverPage'],
-        ];
-
+        $company = $this->formatBasicInfo($details, $stock_code);
+    
         //沿革情報
-        $history = $this->formatHistory(['html' => $details['CompanyHistoryTextBlock']]);
+        $histories = $this->formatHistory(['html' => $details['CompanyHistoryTextBlock']]);
 
+        //役員情報（TODO 実装）
+        // $executive = $this->formatExecutive(['html' => $details['InformationAboutOfficersTextBlock']]);
 
-        //財務情報
-        $closing = [
-            //売上高（連結＋単体）
-            'sales' => $details['NetSalesSummaryOfBusinessResults'],
-            //経常利益（連結＋単体）
-            'profit' => $details['OrdinaryIncomeLossSummaryOfBusinessResults'],
-            //純利益（連結）
-            'net_profit' => $details['ProfitLossAttributableToOwnersOfParentSummaryOfBusinessResults'],
-            //従業員数（連結＋？）
-            'employee' => $details['NumberOfEmployees'],
+        //業績推移
+        $closing_years = $this->formatClosing(['html' => $details['BusinessResultsOfGroupTextBlock']]);
+
+        return [
+            'company'       => $company,
+            'closing_years' => $closing_years,
+            'histories'     => $histories
+        ];
+    }
+
+    /**
+     * 会社の基本情報
+     *
+     * @param array $company
+     * @return array
+     */
+    private function formatBasicInfo(array $company, string $stock_code): array
+    {
+        // 年間平均給与(万円単位に変換) 
+        $salary = $company['AverageAnnualSalaryInformationAboutReportingCompanyInformationAboutEmployees'];
+        $averageAnnualSalary = ViewFormat::convertToTenThousand($salary);
+
+        // 従業員の平均年齢（X年Yヶ月）
+        $yearsEmployeeAge = $company['AverageAgeYearsInformationAboutReportingCompanyInformationAboutEmployees'];
+        $monthsEmployeeAge = $company['AverageAgeMonthsInformationAboutReportingCompanyInformationAboutEmployees'];
+
+        return  [
+            'stock_code'          => $stock_code,
+            'company'             => $company['CompanyNameCoverPage'],
+            'ceo'                 => $company['TitleAndNameOfRepresentativeCoverPage'],
+            'address'             => $company['AddressOfRegisteredHeadquarterCoverPage'],
+            'salary'              => $averageAnnualSalary,
+            'salary_unit'         => '万円',
+            'employee_age_years'  => $yearsEmployeeAge,
+            'employee_age_months' => $monthsEmployeeAge,
+        ];
+    }
+
+    /**
+     * 決算情報を整形
+     *
+     * @param array $closings
+     * @return array
+     */
+    private function formatClosing(array $closings): array
+    {
+        //有価証券報告書・見開き１ページ目の決算情報を整形
+        $closing_to_array = explode("<tr style=", $closings['html']);
+        //データを取得できる形にグルーピング
+        foreach ($closing_to_array as $item) {
+            $array_by_columns = explode("\n", $item);
+            $closingData = [];
+            foreach ($array_by_columns as $closing_record) {
+                if (substr($closing_record, 0, 5) === '<span') {
+                    $closingData[] = rtrim(mb_substr($closing_record, 66, 300,"utf-8"), '</span>');
+                }
+            }
+
+            $formatted_records[] = $closingData ?? null;
+        }
+
+        /**
+         * 2列目: 決算
+         *
+         *  0 => "決算年月"
+         *  1 => "2016年2月"
+         *  2 => "2017年3月"
+         *  3 => "2018年4月"
+         */
+        foreach ($formatted_records[2] as $year) {
+            if (! strpos($year,'年月')) {
+                $result['year'][] = $year;
+            }
+        }
+
+        /**
+         * 3列目: 売上
+         *
+         *  0 => "売上高"
+         *  1 => "(百万円)"
+         *  2 => "238,154"
+         *  3 => "238,952"
+         */
+        foreach ($formatted_records[3] as $sales) {
+            $sales_record = $this->formatCurrency($sales, $formatted_records[3][1]);
+            if ($sales_record) {
+                $result['sales']['value'][] = $sales_record;
+            }
+        }
+        $result['sales']['label'] = $formatted_records[3][0];
+        $result['sales']['unit'] = '億円';
+
+        /**
+         * 4列目: 利益
+         *
+         *  0 => "経常利益"
+         *  1 => "(百万円)"
+         *  2 => "238,154"
+         *  3 => "238,952"
+         */
+        foreach ($formatted_records[4] as $sales) {
+            $sales_record = $this->formatCurrency($sales, $formatted_records[4][1]);
+            if ($sales_record) {
+                $result['profit']['value'][] = $sales_record;
+            }
+        }
+        $result['profit']['label'] = $formatted_records[4][0];
+        $result['profit']['unit'] = '億円';
+
+        //最新の業績を整形
+        $result['latest_performance'] = [
+            'closing_month'      => end($result['year']),
+            'sales_type'         => $result['sales']['label'],
+            'sales_performance'  => end($result['sales']['value']),
+            'profit_type'        => $result['profit']['label'],
+            'profit_performance' => end($result['profit']['value']),
+            'unit'               => '億円'
         ];
 
+        return $result;
+    }
+
+    /**
+     * 通貨単位の変換
+     *
+     * @param string $amount
+     * @param string $unit
+     * @return int|null
+     */
+    private function formatCurrency(string $amount, string $unit): ?int
+    {
+        if (strpos($unit,'百万円')) {
+            if ($amount !== $unit) {
+                $amountConvertedInt = ViewFormat::convertAmount($amount);
+                return ViewFormat::convertMillionToBillion($amountConvertedInt);
+            } else {
+                return null;
+            }
+        } elseif (strpos($unit,'千円')) {
+            if ($amount !== $unit) {
+                $amountConvertedInt = ViewFormat::convertAmount($amount);
+                return ViewFormat::convertThousandToBillion($amountConvertedInt);
+            } else {
+                return null;
+            }
+        } else {
+            return null;
+        }
     }
 
     /**
@@ -112,5 +226,17 @@ class ImportEdinetXmlService
         }
 
         return $result;
+    }
+
+    /**
+     * 役員一覧を取得
+     *
+     * @param array $executive
+     * @return array
+     */
+    private function formatExecutive(array $executive): array
+    {
+        //取得が困難
+        return [];
     }
 }
